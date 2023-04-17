@@ -142,7 +142,7 @@ int main () {
         const char *msg_chr = msg2.c_str();
         ret_val = send(fd, msg_chr, strlen(msg_chr), 0);
         i++;
-        // sleep(1);
+        sleep(1);
     }
 
     t.join();

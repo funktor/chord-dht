@@ -21,7 +21,7 @@
 #include <functional>
 
 #define MAX_CONNS 10000
-#define MAX_KEYS 10000
+#define KEY_SPACE_SIZE 4294967296
 #define MAX_CONCURRENT_CONNECTIONS 1000
 #define MAX_EVENTS 1000
 #define DATA_BUFFER 1024
@@ -62,7 +62,7 @@ std::vector<std::string> split(std::string s, std::string delimiter) {
 unsigned long get_hash(std::string key) {
     const std::hash<std::string> hasher;
     const auto hashResult = hasher(key);
-    return hashResult % MAX_KEYS;
+    return hashResult % KEY_SPACE_SIZE;
 }
 
 std::string get_current_time() {
@@ -73,7 +73,7 @@ std::string get_current_time() {
 unsigned long dist(unsigned long a, unsigned long b) {
     unsigned long c = b-a;
     if (c < 0) {
-        return MAX_KEYS + c;
+        return KEY_SPACE_SIZE + c;
     }
     return c;
 }
@@ -86,17 +86,6 @@ struct HashValue {
 struct Qmsg {
     std::string msg;
     int fd;
-};
-
-struct Partition {
-    std::string ip_port;
-    unsigned long hsh;
-};
-
-struct PartitionCmp {
-    bool operator() (Partition a, Partition b) const {
-        return a.hsh < b.hsh;
-    }
 };
 
 class Server {
@@ -119,14 +108,11 @@ class Server {
     void run_epoll();
     int handle_request(std::string msg, int fd);
     int add_new_partition(std::string ip_port);
+    void delete_partition(std::string ip_port);
     int get_next_server_to_fwd(std::string key);
     int get_next_server_in_ring(std::string key, bool exclude_self);
     void reconcile_keys();
     void ask_to_join(int fd);
-    unsigned long lower_bound(unsigned long x);
-    void fill_in_filter(unsigned long first_server);
-    unsigned long get_successor(unsigned long hash);
-    unsigned long get_predecessor(unsigned long hash);
 };
 
 void Server::init_epoll() {
@@ -190,7 +176,7 @@ void Server::create_server() {
 
     unsigned long p = 1;
     for (int i = 0; i < 32; i++) {
-        finger[(hsh + p) % MAX_KEYS] = LONG_MAX;
+        finger[(hsh + p) % KEY_SPACE_SIZE] = LONG_MAX;
         p *= 2;
     }
 
@@ -232,7 +218,6 @@ int Server::add_new_partition(std::string ip_port) {
         exit(EXIT_FAILURE);
     }
 
-    std::cout << ip_port << std::endl;
     printf("Created a socket with fd: %d\n", fd);
 
     saddr.sin_family = AF_INET;         
@@ -262,6 +247,41 @@ int Server::add_new_partition(std::string ip_port) {
     return fd;
 }
 
+void Server::delete_partition(std::string ip_port) {
+    std::vector<std::string> addr = split(ip_port, ":");
+
+    if (addr.size() != 2) {
+        perror ("Invalid IP PORT format, required IP:PORT");
+        exit(EXIT_FAILURE);
+    }
+
+    unsigned long hsh = get_hash(ip_port);
+
+    for (auto kv : finger) {
+        unsigned long key = kv.first;
+        unsigned long val = kv.second;
+
+        auto it = partitions_hashes.upper_bound(key);
+
+        if (it == partitions_hashes.end()) it = partitions_hashes.begin();
+        finger[key] = *it;
+
+        if (val == LONG_MAX || dist(key, val) > dist(key, hsh)) {
+            finger[key] = hsh;
+        }
+    }
+
+    if (partitions_hashes.find(hsh) != partitions_hashes.end()) {
+        partitions_hashes.erase(hsh);
+    }
+
+    if (hash_to_socket_map.find(hsh) != hash_to_socket_map.end()) {
+        int fd = hash_to_socket_map[hsh];
+        close(fd);
+        hash_to_socket_map.erase(hsh);
+    }
+}
+
 void Server::ask_to_join(int fd) {
     std::string ctime = get_current_time();
     std::string msg = ctime + " 0 JOIN " + public_ip + ":" + std::to_string(public_port) + " " + ctime + "<EOM>";
@@ -272,6 +292,11 @@ void Server::ask_to_join(int fd) {
 void Server::reconcile_keys() {
     std::string ip_port = public_ip + ":" + std::to_string(public_port);
     int fd = get_next_server_in_ring(ip_port, true);
+
+    if (fd == -1 || fd == server_fd) {
+        perror ("Invalid server found for reconciliation");
+        exit(EXIT_FAILURE);
+    }
 
     std::string ctime = get_current_time();
     std::string msg = ctime + " 0 RECONCILE " + ip_port + " " + ctime + "<EOM>";
@@ -371,29 +396,6 @@ void Server::run_epoll() {
             }
         }
     }
-}
-
-unsigned long Server::get_predecessor(unsigned long x) {
-    auto it = finger.lower_bound(x);
-
-    if ((it == finger.end()) || (it == finger.begin())) {
-        return finger.rbegin()->first;
-    } 
-    else {
-        it--;
-        return it->first;
-    }
-}
-
-unsigned long Server::lower_bound(unsigned long x) {
-    unsigned long nxt_key = get_predecessor(x);
-    std::cout << std::to_string(nxt_key) << std::endl;
-
-    if (finger.find(nxt_key) != finger.end()) {
-        return finger[nxt_key];
-    }
-
-    return 0;
 }
 
 int Server::get_next_server_to_fwd(std::string key) {
@@ -638,10 +640,6 @@ int main (int argc, char *argv[]) {
         std::string p(argv[i], argv[i] + strlen(argv[i]));
         int fd = server.add_new_partition(p);
         server.ask_to_join(fd);
-    }
-
-    for (auto kv : server.finger) {
-        std::cout << std::to_string(kv.first) << " " << std::to_string(kv.second) << std::endl;
     }
 
     server.reconcile_keys();
