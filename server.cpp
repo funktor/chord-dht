@@ -21,7 +21,7 @@
 #include <functional>
 
 #define MAX_CONNS 10000
-#define MAX_KEYS 4294967296
+#define MAX_KEYS 10000
 #define MAX_CONCURRENT_CONNECTIONS 1000
 #define MAX_EVENTS 1000
 #define DATA_BUFFER 1024
@@ -70,6 +70,14 @@ std::string get_current_time() {
     return std::to_string(t);
 }
 
+unsigned long dist(unsigned long a, unsigned long b) {
+    unsigned long c = b-a;
+    if (c < 0) {
+        return MAX_KEYS + c;
+    }
+    return c;
+}
+
 struct HashValue {
     std::string val;
     unsigned long long timestamp;
@@ -85,6 +93,12 @@ struct Partition {
     unsigned long hsh;
 };
 
+struct PartitionCmp {
+    bool operator() (Partition a, Partition b) const {
+        return a.hsh < b.hsh;
+    }
+};
+
 class Server {
     public:
     int server_fd = -1;
@@ -97,18 +111,22 @@ class Server {
     std::deque<Qmsg> msgs_to_send;
     std::unordered_map<std::string, int> request_id_to_fd;
     std::map<unsigned long, unsigned long> finger;
+    std::set<unsigned long> partitions_hashes;
 
     void init_epoll();
     void add_fd_to_epoll(int fd, uint32_t events);
     void create_server();
     void run_epoll();
     int handle_request(std::string msg, int fd);
-    int add_new_partition(Partition part);
-    int get_next_server(std::string key, bool exclude_self);
+    int add_new_partition(std::string ip_port);
+    int get_next_server_to_fwd(std::string key);
+    int get_next_server_in_ring(std::string key, bool exclude_self);
     void reconcile_keys();
     void ask_to_join(int fd);
     unsigned long lower_bound(unsigned long x);
     void fill_in_filter(unsigned long first_server);
+    unsigned long get_successor(unsigned long hash);
+    unsigned long get_predecessor(unsigned long hash);
 };
 
 void Server::init_epoll() {
@@ -167,7 +185,8 @@ void Server::create_server() {
 
     std::string ip_port = public_ip + ":" + std::to_string(public_port);
     unsigned long hsh = get_hash(ip_port);
-    finger[hsh] = hsh;
+
+    partitions_hashes.insert(hsh);
 
     unsigned long p = 1;
     for (int i = 0; i < 32; i++) {
@@ -179,8 +198,7 @@ void Server::create_server() {
     add_fd_to_epoll(fd, EPOLLIN | EPOLLET);
 }
 
-int Server::add_new_partition(Partition part) {
-    std::string ip_port = part.ip_port;
+int Server::add_new_partition(std::string ip_port) {
     std::vector<std::string> addr = split(ip_port, ":");
 
     if (addr.size() != 2) {
@@ -188,79 +206,60 @@ int Server::add_new_partition(Partition part) {
         exit(EXIT_FAILURE);
     }
 
-    unsigned long hsh = part.hsh;
-    bool updated = false;
+    unsigned long hsh = get_hash(ip_port);
+    partitions_hashes.insert(hsh);
 
     for (auto kv : finger) {
         unsigned long key = kv.first;
         unsigned long val = kv.second;
 
-        if (hsh >= key) {
-            if (hsh < val) {
-                finger[key] = hsh;
-                updated = true;
-            }
+        if (val == LONG_MAX || dist(key, val) > dist(key, hsh)) {
+            finger[key] = hsh;
+        }
+    }
+
+    std::string ip = addr[0];
+    int port = std::stoi(addr[1]);
+
+    struct sockaddr_in saddr;
+    int fd, ret_val, ret;
+    struct hostent *local_host;
+
+    fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP); 
+
+    if (fd == -1) {
+        perror ("Creating socket failed");
+        exit(EXIT_FAILURE);
+    }
+
+    std::cout << ip_port << std::endl;
+    printf("Created a socket with fd: %d\n", fd);
+
+    saddr.sin_family = AF_INET;         
+    saddr.sin_port = htons(port);     
+    local_host = gethostbyname(ip.c_str());
+    saddr.sin_addr = *((struct in_addr *)local_host->h_addr);
+
+    fcntl(fd, F_SETFL, O_NONBLOCK);
+
+    while (1) {
+        ret_val = connect(fd, (struct sockaddr *)&saddr, sizeof(struct sockaddr_in));
+
+        if (ret_val < 0) {
+            std::cout << "Connect to socket failed" << std::endl;
+            sleep(1);
         }
         else {
             break;
         }
     }
 
-    if (updated) {
-        std::string ip = addr[0];
-        int port = std::stoi(addr[1]);
+    printf("The Socket is now connected\n");
 
-        struct sockaddr_in saddr;
-        int fd, ret_val, ret;
-        struct hostent *local_host;
+    hash_to_socket_map[hsh] = fd;
+    add_fd_to_epoll(fd, EPOLLIN | EPOLLOUT | EPOLLET);
 
-        fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP); 
-
-        if (fd == -1) {
-            perror ("Creating socket failed");
-            exit(EXIT_FAILURE);
-        }
-
-        std::cout << ip_port << std::endl;
-        printf("Created a socket with fd: %d\n", fd);
-
-        saddr.sin_family = AF_INET;         
-        saddr.sin_port = htons(port);     
-        local_host = gethostbyname(ip.c_str());
-        saddr.sin_addr = *((struct in_addr *)local_host->h_addr);
-
-        fcntl(fd, F_SETFL, O_NONBLOCK);
-
-        while (1) {
-            ret_val = connect(fd, (struct sockaddr *)&saddr, sizeof(struct sockaddr_in));
-
-            if (ret_val < 0) {
-                std::cout << "Connect to socket failed" << std::endl;
-                sleep(1);
-            }
-            else {
-                break;
-            }
-        }
-
-        printf("The Socket is now connected\n");
-        std::cout << ip_port << " " << std::to_string(hsh) << std::endl;
-
-        hash_to_socket_map[hsh] = fd;
-        add_fd_to_epoll(fd, EPOLLIN | EPOLLOUT | EPOLLET);
-
-        return fd;
-    }
-
-    return -1;
-}
-
-void Server::fill_in_filter(unsigned long first_server) {
-    for (auto kv : finger) {
-        if (kv.second == LONG_MAX) {
-            finger[kv.first] = first_server;
-        }
-    }
+    return fd;
 }
 
 void Server::ask_to_join(int fd) {
@@ -272,7 +271,7 @@ void Server::ask_to_join(int fd) {
 
 void Server::reconcile_keys() {
     std::string ip_port = public_ip + ":" + std::to_string(public_port);
-    int fd = get_next_server(ip_port, true);
+    int fd = get_next_server_in_ring(ip_port, true);
 
     std::string ctime = get_current_time();
     std::string msg = ctime + " 0 RECONCILE " + ip_port + " " + ctime + "<EOM>";
@@ -374,48 +373,76 @@ void Server::run_epoll() {
     }
 }
 
-unsigned long Server::lower_bound(unsigned long x) {
-    std::cout << std::to_string(x) << std::endl;
-
+unsigned long Server::get_predecessor(unsigned long x) {
     auto it = finger.lower_bound(x);
-    unsigned long nxt_hash;
 
-    if (it == finger.end()) {
-        nxt_hash = finger.rbegin()->second;
-        std::cout << std::to_string(nxt_hash) << std::endl;
+    if ((it == finger.end()) || (it == finger.begin())) {
+        return finger.rbegin()->first;
     } 
     else {
-        if ((it->first == x) || (it == finger.begin())) {
-            nxt_hash = it->second;
-            std::cout << std::to_string(nxt_hash) << std::endl;
-        }
-        else {
-            it--;
-            nxt_hash = it->second;
-            std::cout << std::to_string(nxt_hash) << std::endl;
-        }
+        it--;
+        return it->first;
     }
-
-    return nxt_hash;
 }
 
-int Server::get_next_server(std::string key, bool exclude_self) {
+unsigned long Server::lower_bound(unsigned long x) {
+    unsigned long nxt_key = get_predecessor(x);
+    std::cout << std::to_string(nxt_key) << std::endl;
+
+    if (finger.find(nxt_key) != finger.end()) {
+        return finger[nxt_key];
+    }
+
+    return 0;
+}
+
+int Server::get_next_server_to_fwd(std::string key) {
     unsigned long key_hash = get_hash(key);
-    std::cout << key << " " << std::to_string(key_hash) << std::endl;
-    unsigned long nxt_hash;
+    auto it = finger.lower_bound(key_hash);
+
+    unsigned long server_hash;
+
+    if ((it == finger.end()) || (it == finger.begin())) {
+        server_hash = finger.rbegin()->second;
+    } 
+    else {
+        it--;
+        server_hash = it->second;
+    }
+
+    if (hash_to_socket_map.find(server_hash) != hash_to_socket_map.end()) {
+        return hash_to_socket_map[server_hash];
+    }
+
+    return 0;
+}
+
+int Server::get_next_server_in_ring(std::string key, bool exclude_self=false) {
+    unsigned long key_hash = get_hash(key);
+    std::set<unsigned long>::iterator it;
 
     if (exclude_self) {
-        nxt_hash = lower_bound((key_hash + 1) % MAX_KEYS);
+        it = partitions_hashes.upper_bound(key_hash);
     }
     else {
-        nxt_hash = lower_bound(key_hash);
+        it = partitions_hashes.lower_bound(key_hash);
     }
 
-    if (hash_to_socket_map.find(nxt_hash) != hash_to_socket_map.end()) {
-        return hash_to_socket_map[nxt_hash];
+    unsigned long server_hash;
+
+    if (it == partitions_hashes.end()) {
+        auto m = partitions_hashes.begin();
+        server_hash = *m;
+    } 
+    else {
+        server_hash = *it;
     }
 
-    return -1;
+    if (hash_to_socket_map.find(server_hash) != hash_to_socket_map.end()) {
+        return hash_to_socket_map[server_hash];
+    }
+
+    return 0;
 }
 
 int Server::handle_request(std::string msg, int fd){
@@ -458,89 +485,62 @@ int Server::handle_request(std::string msg, int fd){
         std::string key = key_val[0];
         std::string val = key_val[1];
 
-        int fwd_sock = get_next_server(key, false);
+        int fwd_sock = get_next_server_in_ring(key);
         std::cout << fwd_sock << std::endl;
 
-        if (fwd_sock == -1) {
-            std::cout << "Could not find server to forward" << std::endl;
-            return -1;
-        }
-
-        unsigned long hsh = get_hash(key);
-        unsigned long nxt_hsh = lower_bound(hsh);
-
-        if (nxt_hsh >= hsh) {
-            msg = request_id + " " + std::to_string(type) + " PUT-NO-FWD " + data + " " + std::to_string(ts);
-        }
-
-        request_id_to_fd[request_id] = fd;
-        struct Qmsg qmsg = {msg, fwd_sock};
-        msgs_to_send.push_back(qmsg);
-    }
-
-    else if(command == "PUT-NO-FWD") {
-        std::vector<std::string> key_val = split(data, ":");
-
-        if (key_val.size() != 2) {
-            std::cout << "Invalid format of data for PUT request" << std::endl;
-            return -1;
-        }
-
-        std::string key = key_val[0];
-        std::string val = key_val[1];
-
-        if (hash_table.find(key) == hash_table.end()) {
-            struct HashValue hv = {val, ts};
-            hash_table[key] = hv;
-        }
-
-        else {
-            HashValue hv = hash_table[key];
-            unsigned long long ts_curr = hv.timestamp;
-            if (ts > ts_curr) {
+        if (fwd_sock == server_fd) {
+            if (hash_table.find(key) == hash_table.end()) {
                 struct HashValue hv = {val, ts};
                 hash_table[key] = hv;
             }
+
+            else {
+                HashValue hv = hash_table[key];
+                unsigned long long ts_curr = hv.timestamp;
+                if (ts > ts_curr) {
+                    struct HashValue hv = {val, ts};
+                    hash_table[key] = hv;
+                }
+            }
+
+            std::string payload = request_id + " 1 OK KEY_INSERTED " + std::to_string(ts);
+            struct Qmsg qmsg = {payload, fd};
+            msgs_to_send.push_back(qmsg);
         }
 
-        std::string payload = request_id + " 1 OK KEY_INSERTED " + std::to_string(ts);
-        struct Qmsg qmsg = {payload, fd};
-        msgs_to_send.push_back(qmsg);
+        else {
+            fwd_sock = get_next_server_to_fwd(key);
+
+            request_id_to_fd[request_id] = fd;
+            struct Qmsg qmsg = {msg, fwd_sock};
+            msgs_to_send.push_back(qmsg);
+        }
     }
 
     else if (command == "GET") {
         std::string key = data;
-        int fwd_sock = get_next_server(key, false);
+        int fwd_sock = get_next_server_in_ring(key);
 
-        if (fwd_sock == -1) {
-            std::cout << "Could not find server to forward" << std::endl;
-            return -1;
+        if (fwd_sock == server_fd) {
+            std::string val = "<EMPTY>";
+
+            if (hash_table.find(key) != hash_table.end()) {
+                HashValue hv = hash_table[key];
+                val = hv.val;
+            }
+
+            std::string payload = request_id + " 1 OK " + val + " " + std::to_string(ts);
+            struct Qmsg qmsg = {payload, fd};
+            msgs_to_send.push_back(qmsg);
         }
 
-        unsigned long hsh = get_hash(key);
-        unsigned long nxt_hsh = lower_bound(hsh);
-
-        if (nxt_hsh >= hsh) {
-            msg = request_id + " " + std::to_string(type) + " GET-NO-FWD " + data + " " + std::to_string(ts);
+        else {
+            fwd_sock = get_next_server_to_fwd(key);
+            
+            request_id_to_fd[request_id] = fd;
+            struct Qmsg qmsg = {msg, fwd_sock};
+            msgs_to_send.push_back(qmsg);
         }
-
-        request_id_to_fd[request_id] = fd;
-        struct Qmsg qmsg = {msg, fwd_sock};
-        msgs_to_send.push_back(qmsg);
-    }
-
-    else if (command == "GET-NO-FWD") {
-        std::string key = data;
-        std::string val = "<EMPTY>";
-
-        if (hash_table.find(key) != hash_table.end()) {
-            HashValue hv = hash_table[key];
-            val = hv.val;
-        }
-
-        std::string payload = request_id + " 1 OK " + val + " " + std::to_string(ts);
-        struct Qmsg qmsg = {payload, fd};
-        msgs_to_send.push_back(qmsg);
     }
 
     else if(command == "JOIN") {
@@ -548,8 +548,7 @@ int Server::handle_request(std::string msg, int fd){
 
         unsigned long hsh = get_hash(ip_port);
         if (hash_to_socket_map.find(hsh) == hash_to_socket_map.end()) {
-            struct Partition p = {ip_port, hsh};
-            add_new_partition(p);
+            add_new_partition(ip_port);
         }
 
         std::string payload = request_id + " 1 OK PARTITION_ADDED " + std::to_string(ts);
@@ -573,7 +572,7 @@ int Server::handle_request(std::string msg, int fd){
                 std::string v = hv.val;
                 unsigned long long ts = hv.timestamp;
 
-                if (get_next_server(k, false) == fd_1) {
+                if (get_next_server_in_ring(k) == fd_1) {
                     std::string ctime = get_current_time();
                     msg += ctime + " 0 RECONCILE-PUT " + k + ":" + v + " " + std::to_string(ts) + "<EOM>";
                     keys_to_delete.push_back(k);
@@ -635,28 +634,16 @@ int main (int argc, char *argv[]) {
     server.public_port = atoi(argv[2]);
     server.create_server();
 
-    std::vector<Partition> partitions;
-
     for (int i = 3; i < argc; i++) {
         std::string p(argv[i], argv[i] + strlen(argv[i]));
-        struct Partition pn = {p, get_hash(p)};
-        partitions.push_back(pn);
+        int fd = server.add_new_partition(p);
+        server.ask_to_join(fd);
     }
-
-    std::sort(partitions.begin(), partitions.end(), 
-                [](const Partition &a, const Partition &b) {return a.hsh < b.hsh;});
-
-    for (auto part : partitions) {
-        int fd = server.add_new_partition(part);
-        // server.ask_to_join(fd);
-    }
-
-    server.fill_in_filter(partitions[0].hsh);
 
     for (auto kv : server.finger) {
         std::cout << std::to_string(kv.first) << " " << std::to_string(kv.second) << std::endl;
     }
 
-    // server.reconcile_keys();
+    server.reconcile_keys();
     server.run_epoll();
 }
