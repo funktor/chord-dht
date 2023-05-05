@@ -123,12 +123,12 @@ int main () {
     std::thread t(recv_messages, fd);
     int i = 0;
     while (1) {
-        // std::string msg_s = generate(5);
-        // std::cout << msg_s << std::endl;
+        std::string msg_s = generate(5);
+        std::cout << msg_s << std::endl;
 
-        // const char *msg = msg_s.c_str();
+        const char *msg = msg_s.c_str();
 
-        fgets(msg, MAX_LIMIT, stdin);
+        // fgets(msg, MAX_LIMIT, stdin);
         std::string msg2(msg, msg + strlen(msg));
         msg2.erase(std::remove(msg2.begin(), msg2.end(), '\n'), msg2.cend());
 
