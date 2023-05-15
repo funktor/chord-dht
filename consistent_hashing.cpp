@@ -24,6 +24,7 @@
 
 class ConsistentHashing {
     public:
-    std::set<>
+    std::set<int> sock_fds;
+    
 
 };
