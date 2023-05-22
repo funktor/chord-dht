@@ -327,6 +327,7 @@ class Server {
     std::string public_ip;
     int public_port;
     unsigned long my_hash;
+    std::string public_ip_port_str;
     struct epoll_event ev, events[MAX_EVENTS];
     std::unordered_map<unsigned long, int> hash_to_socket_map;
     std::unordered_map<std::string, HashValue> hash_table;
@@ -335,9 +336,6 @@ class Server {
     std::set<HashPair, IpPortCmp> successors;
     std::unordered_set<unsigned long> successor_hashes;
     std::string predecessor="";
-    bool successor_found = false;
-    bool predecessor_found = false;
-    int succ_fd;
 
     void init_epoll();
     void add_fd_to_epoll(int fd, uint32_t events);
@@ -384,12 +382,12 @@ class Server {
     int reconcile_keys(Request req, std::vector<Request> &resp);
     int reconcile_keys_rpc(Request req, std::string ip, int port, std::vector<Request> &resp);
 
-    void update_predecessor();
-    void update_successor_pred();
-    void update_successor_list();
-    void update_predecessor_succ();
-    void update_own_finger();
-    void update_chord_fingers();
+    void set_self_predecessor();
+    void set_successor_of_pred();
+    void set_successor_list();
+    void set_predecessor_of_succ();
+    void update_self_finger_table();
+    void update_finger_table_others();
     void reconcile_keys_succ();
     void insert_successor(std::string ip_port);
     void insert_predecessor(std::string ip_port);
@@ -417,11 +415,6 @@ int Server::create_socket_fd(std::string ip_port) {
 
 // Add a new successor
 void Server::insert_successor(std::string ip_ports) {
-    if (!successor_found) {
-        successor_found = true;
-        successors.clear();
-    }
-
     std::vector<std::string> ip_ports_vector = split(ip_ports, ",");
 
     for (std::string ip_port : ip_ports_vector) {
@@ -534,22 +527,7 @@ int Server::send_message_to_next(Request req, std::string ip_port) {
     if (fd == -1 || fd == server_fd) return -1;
 
     while (1) {
-        int res = -1;
-        int num_retries = 0;
-        int backoff = 1;
-        int max_backoff = 20;
-
-        res = send_message(fd, req);
-
-        // while (num_retries < 5) {
-        //     res = send_message(fd, req);
-        //     if (res == -1) {
-        //         sleep(backoff);
-        //         backoff = (2*backoff < max_backoff)?(2*backoff):max_backoff;
-        //         num_retries++;
-        //     }
-        //     else break;
-        // }
+        int res = send_message(fd, req);
 
         if (res != -1) return 1;
         else {
@@ -626,7 +604,7 @@ int Server::get_predecessor(Request req, std::vector<Request> &resp) {
     std::string pred;
 
     if (predecessor != "") pred = predecessor;
-    else pred = public_ip + ":" + std::to_string(public_port);
+    else pred = public_ip_port_str;
 
     Request r = {request_id, 1, "GET-PREDECESSOR", pred, ts};
     resp.push_back(r);
@@ -636,7 +614,6 @@ int Server::get_predecessor(Request req, std::vector<Request> &resp) {
 
 int Server::get_predecessor_rpc(Request req, std::string ip, int port, std::vector<Request> &resp) {
     std::string ip_str = ip + ":" + std::to_string(port);
-
     int res = -1;
     unsigned long hash = get_hash(ip_str);
 
@@ -655,16 +632,15 @@ int Server::get_predecessor_rpc(Request req, std::string ip, int port, std::vect
     return res;
 }
 
-void Server::update_predecessor() {
+void Server::set_self_predecessor() {
     std::vector<Request> resp;
     IpPort i_p = get_successor_ip_port();
-    std::string ip_port_str = public_ip + ":" + std::to_string(public_port);
 
     if (i_p.port != -1) {
         std::string curr_time = get_current_time();
         std::string request_id = curr_time + generate(5);
     
-        Request r = {request_id, 0, "GET-PREDECESSOR", ip_port_str, std::stoull(curr_time)};
+        Request r = {request_id, 0, "GET-PREDECESSOR", public_ip_port_str, std::stoull(curr_time)};
         get_predecessor_rpc(r, i_p.ip, i_p.port, resp);
     }
     else {
@@ -680,7 +656,7 @@ int Server::get_successors(Request req, std::vector<Request> &resp) {
     std::string request_id = req.request_id;
     unsigned long long ts = req.ts;
 
-    std::string output = public_ip + ":" + std::to_string(public_port);
+    std::string output = public_ip_port_str;
 
     for (auto succ : successors) {
         output += ",";
@@ -720,16 +696,15 @@ int Server::get_successors_rpc(Request req, std::string ip, int port, std::vecto
     return res;
 }
 
-void Server::update_successor_list() {
+void Server::set_successor_list() {
     std::vector<Request> resp;
     IpPort i_p = get_successor_ip_port();
-    std::string ip_port_str = public_ip + ":" + std::to_string(public_port);
 
     if (i_p.port != -1) {
         std::string curr_time = get_current_time();
         std::string request_id = curr_time + generate(5);
     
-        Request r = {request_id, 0, "GET-SUCCESSOR", ip_port_str, std::stoull(curr_time)};
+        Request r = {request_id, 0, "GET-SUCCESSOR", public_ip_port_str, std::stoull(curr_time)};
         get_successors_rpc(r, i_p.ip, i_p.port, resp);
     }
     else {
@@ -777,7 +752,7 @@ int Server::set_predecessor_rpc(Request req, std::string ip, int port, std::vect
     return res;
 }
 
-void Server::update_predecessor_succ() {
+void Server::set_predecessor_of_succ() {
     std::vector<Request> resp;
     IpPort i_p = get_successor_ip_port();
     std::string ip_port_str = public_ip + ":" + std::to_string(public_port);
@@ -832,7 +807,7 @@ int Server::set_successor_rpc(Request req, std::string ip, int port, std::vector
     return res;
 }
 
-void Server::update_successor_pred() {
+void Server::set_successor_of_pred() {
     std::vector<Request> resp;
     std::string ip_port_str = public_ip + ":" + std::to_string(public_port);
 
@@ -1003,7 +978,7 @@ int Server::get_finger_rpc(Request req, std::string ip, int port, std::vector<Re
     return res;
 }
 
-void Server::update_own_finger() {
+void Server::update_self_finger_table() {
     std::vector<Request> resp;
     IpPort i_p = get_successor_ip_port();
     std::string ip_port_str = public_ip + ":" + std::to_string(public_port);
@@ -1093,7 +1068,7 @@ int Server::set_finger_rpc(Request req, std::string ip, int port, std::vector<Re
     return res;
 }
 
-void Server::update_chord_fingers() {
+void Server::update_finger_table_others() {
     std::vector<Request> resp;
     IpPort i_p = get_successor_ip_port();
     std::string ip_port_str = public_ip + ":" + std::to_string(public_port);
@@ -1328,8 +1303,8 @@ void Server::create_server() {
     server_fd = fd;
     fcntl(server_fd, F_SETFL, O_NONBLOCK);
 
-    std::string ip_port = public_ip + ":" + std::to_string(public_port);
-    my_hash = get_hash(ip_port);
+    public_ip_port_str = public_ip + ":" + std::to_string(public_port);
+    my_hash = get_hash(public_ip_port_str);
 
     unsigned long p = 1;
     for (int i = 0; i < 32; i++) {
@@ -1343,6 +1318,7 @@ void Server::create_server() {
 void Server::update_finger_table(std::string ip_port) {
     unsigned long hsh = get_hash(ip_port);
     bool updated = false;
+    std::vector<unsigned long> updated_vals;
 
     for (auto kv : finger) {
         unsigned long key = kv.first;
@@ -1351,10 +1327,21 @@ void Server::update_finger_table(std::string ip_port) {
         if (dist(key, val) > dist(key, hsh)) {
             finger[key] = hsh;
             updated = true;
+            updated_vals.push_back(val);
         }
     }
 
     if (updated) {
+        for (unsigned long val : updated_vals) {
+            if (hash_to_socket_map.find(val) != hash_to_socket_map.end()) {
+                if (val != get_hash(predecessor) && successor_hashes.find(val) == successor_hashes.end()) {
+                    int fd = hash_to_socket_map[val];
+                    del_fd_from_epoll(fd);
+                    hash_to_socket_map.erase(val);
+                }
+            }
+        }
+        
         if (hash_to_socket_map.find(hsh) == hash_to_socket_map.end()) {
             IpPort i_p = get_ip_port(ip_port);
             int fd = add_connection(i_p.ip, i_p.port, hash_to_socket_map);
@@ -1376,6 +1363,14 @@ void Server::update_finger_table(std::string ip_port, unsigned long diff) {
     }
 
     if (updated) {
+        if (hash_to_socket_map.find(val) != hash_to_socket_map.end()) {
+            if (val != get_hash(predecessor) && successor_hashes.find(val) == successor_hashes.end()) {
+                int fd = hash_to_socket_map[val];
+                del_fd_from_epoll(fd);
+                hash_to_socket_map.erase(val);
+            }
+        }
+
         if (hash_to_socket_map.find(hsh) == hash_to_socket_map.end()) {
             IpPort i_p = get_ip_port(ip_port);
             int fd = add_connection(i_p.ip, i_p.port, hash_to_socket_map);
@@ -1395,10 +1390,10 @@ void Server::run_epoll() {
     while (1) {
         try {
             if (std::time(0) > stabilization_timeout) {
-                update_successor_list();
-                update_predecessor();
-                update_predecessor_succ();
-                update_successor_pred();
+                set_successor_list();
+                set_self_predecessor();
+                set_predecessor_of_succ();
+                set_successor_of_pred();
 
                 std::cout << "PREDECESSOR : " << predecessor << std::endl;
                 std::cout << "SUCCESSORS : " << std::endl;
@@ -1412,8 +1407,8 @@ void Server::run_epoll() {
             }
 
             if (std::time(0) > finger_timeout) {
-                update_chord_fingers();
-                update_own_finger();
+                update_finger_table_others();
+                update_self_finger_table();
 
                 std::cout << "Fingers" << std::endl;
                 for (auto kv : finger) {
@@ -1695,11 +1690,8 @@ int main (int argc, char *argv[]) {
         // connect with one of random servers in the circle
         std::string p(argv[3], argv[3] + strlen(argv[3]));
 
-        HashPair hp = {server.my_hash, p};
-        server.successors.insert(hp);
-
-        int fd = server.create_socket_fd(p);
-        server.succ_fd = fd;
+        // initialize random machine as successor
+        server.insert_successor(p);
     }
 
     server.run_epoll();
