@@ -483,24 +483,8 @@ int Server::send_message_to_ip_port(Request req, std::string ip_port) {
     int succ_order = 1;
     while (1) {
         int fd = create_socket_fd(ip_port);
-
-        int res = -1;
-        int num_retries = 0;
-        int backoff = 1;
-        int max_backoff = 20;
-
-        res = send_message(fd, req);
-
-        // while (num_retries < 5) {
-        //     res = send_message(fd, req);
-        //     if (res == -1) {
-        //         sleep(backoff);
-        //         backoff = (2*backoff < max_backoff)?(2*backoff):max_backoff;
-        //         num_retries++;
-        //     }
-        //     else break;
-        // }
-
+        int res = send_message(fd, req);
+        
         if (res != -1) return 1;
         else {
             IpPort succ = get_successor_ip_port(succ_order);
@@ -559,22 +543,7 @@ int Server::send_message_to_next(Request req, unsigned long hash, bool reverse=f
     if (fd == -1 || fd == server_fd) return -1;
 
     while (1) {
-        int res = -1;
-        int num_retries = 0;
-        int backoff = 1;
-        int max_backoff = 20;
-
-        res = send_message(fd, req);
-
-        // while (num_retries < 5) {
-        //     res = send_message(fd, req);
-        //     if (res == -1) {
-        //         sleep(backoff);
-        //         backoff = (2*backoff < max_backoff)?(2*backoff):max_backoff;
-        //         num_retries++;
-        //     }
-        //     else break;
-        // }
+        int res = send_message(fd, req);
 
         if (res != -1) return 1;
         else {
