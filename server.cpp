@@ -484,7 +484,7 @@ int Server::send_message_to_ip_port(Request req, std::string ip_port) {
     while (1) {
         int fd = create_socket_fd(ip_port);
         int res = send_message(fd, req);
-        
+
         if (res != -1) return 1;
         else {
             IpPort succ = get_successor_ip_port(succ_order);
@@ -724,13 +724,12 @@ int Server::set_predecessor_rpc(Request req, std::string ip, int port, std::vect
 void Server::set_predecessor_of_succ() {
     std::vector<Request> resp;
     IpPort i_p = get_successor_ip_port();
-    std::string ip_port_str = public_ip + ":" + std::to_string(public_port);
 
     if (i_p.port != -1) {
         std::string curr_time = get_current_time();
         std::string request_id = curr_time + generate(5);
     
-        Request r = {request_id, 0, "SET-PREDECESSOR", ip_port_str, std::stoull(curr_time)};
+        Request r = {request_id, 0, "SET-PREDECESSOR", public_ip_port_str, std::stoull(curr_time)};
         set_predecessor_rpc(r, i_p.ip, i_p.port, resp);
     }
     else {
@@ -778,14 +777,13 @@ int Server::set_successor_rpc(Request req, std::string ip, int port, std::vector
 
 void Server::set_successor_of_pred() {
     std::vector<Request> resp;
-    std::string ip_port_str = public_ip + ":" + std::to_string(public_port);
 
     if (predecessor != "") {
         IpPort i_p = get_ip_port(predecessor);
         std::string curr_time = get_current_time();
         std::string request_id = curr_time + generate(5);
     
-        Request r = {request_id, 0, "SET-SUCCESSOR", ip_port_str, std::stoull(curr_time)};
+        Request r = {request_id, 0, "SET-SUCCESSOR", public_ip_port_str, std::stoull(curr_time)};
         set_successor_rpc(r, i_p.ip, i_p.port, resp);
     }
     else {
@@ -950,7 +948,6 @@ int Server::get_finger_rpc(Request req, std::string ip, int port, std::vector<Re
 void Server::update_self_finger_table() {
     std::vector<Request> resp;
     IpPort i_p = get_successor_ip_port();
-    std::string ip_port_str = public_ip + ":" + std::to_string(public_port);
 
     if (i_p.port != -1) {
         unsigned long p = 1;
@@ -1040,13 +1037,12 @@ int Server::set_finger_rpc(Request req, std::string ip, int port, std::vector<Re
 void Server::update_finger_table_others() {
     std::vector<Request> resp;
     IpPort i_p = get_successor_ip_port();
-    std::string ip_port_str = public_ip + ":" + std::to_string(public_port);
 
     if (i_p.port != -1) {
         unsigned long p = 1;
 
         for (int i = 0; i < 32; i++) {
-            std::string data = std::to_string(p) + "-" + ip_port_str;
+            std::string data = std::to_string(p) + "-" + public_ip_port_str;
 
             std::string curr_time = get_current_time();
             std::string request_id = curr_time + generate(5);
