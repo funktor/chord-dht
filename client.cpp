@@ -26,6 +26,10 @@
 
 #define MAX_LIMIT 4096
 
+long get_time_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
 std::string get_current_time() {
     std::time_t t = std::time(0);
     return std::to_string(t);
@@ -133,16 +137,16 @@ int main () {
         msg2.erase(std::remove(msg2.begin(), msg2.end(), '\n'), msg2.cend());
 
         if (msg2.find(":") != std::string::npos) {
-            msg2 = std::to_string(i) + " 0 PUT " + msg2 + " " + get_current_time() + "<EOM>";
+            msg2 = std::to_string(i) + " 0 PUT " + msg2 + " " + std::to_string(get_time_ms()) + " NULL<EOM>";
         }
         else {
-            msg2 = std::to_string(i) + " 0 GET " + msg2 + " " + get_current_time() + "<EOM>";
+            msg2 = std::to_string(i) + " 0 GET " + msg2 + " " + std::to_string(get_time_ms()) + " NULL<EOM>";
         }
 
         const char *msg_chr = msg2.c_str();
         ret_val = send(fd, msg_chr, strlen(msg_chr), 0);
         i++;
-        sleep(1);
+        // sleep(1);
     }
 
     t.join();
